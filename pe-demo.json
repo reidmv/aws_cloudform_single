@@ -1,0 +1,220 @@
+{
+  "AWSTemplateFormatVersion": "2010-09-09",
+  "Parameters": {
+    "KeyPair": {
+      "Description": "The EC2 KeyPair for SSH",
+      "Type": "String"
+    },
+    "PuppetCreatedBy": {
+      "Description": "AWS Id of the person creating the machine",
+      "Type": "String"
+    },
+    "PuppetDepartment": {
+      "Description": "Puppet Department",
+      "Type": "String"
+    },
+    "PuppetProject": {
+      "Description": "The project the machine(s) exist for",
+      "Type": "String"
+    }
+  },
+  "Resources": {
+    "StackVPC": {
+      "Type": "AWS::EC2::VPC",
+      "Properties": {
+        "CidrBlock": "10.0.0.0/16",
+        "EnableDnsSupport": true,
+        "EnableDnsHostnames": true,
+        "InstanceTenancy": "default"
+      }
+    },
+    "StackSG": {
+      "Type": "AWS::EC2::SecurityGroup",
+      "Properties": {
+        "GroupDescription": "StackStack",
+        "SecurityGroupIngress": [
+          {
+            "IpProtocol": "tcp",
+            "FromPort": "22",
+            "ToPort": "22",
+            "CidrIp": "0.0.0.0/0"
+          },
+          {
+            "IpProtocol": "tcp",
+            "FromPort": "443",
+            "ToPort": "443",
+            "CidrIp": "0.0.0.0/0"
+          },
+          {
+            "IpProtocol": "tcp",
+            "FromPort": "61613",
+            "ToPort": "61613",
+            "CidrIp": "10.0.0.0/16"
+          },
+          {
+            "IpProtocol": "tcp",
+            "FromPort": "8142",
+            "ToPort": "8142",
+            "CidrIp": "10.0.0.0/16"
+          },
+          {
+            "IpProtocol": "tcp",
+            "FromPort": "8140",
+            "ToPort": "8140",
+            "CidrIp": "10.0.0.0/16"
+          },
+          {
+            "IpProtocol": "tcp",
+            "FromPort": "80",
+            "ToPort": "80",
+            "CidrIp": "0.0.0.0/0"
+          }
+        ],
+        "VpcId": {
+          "Ref": "StackVPC"
+        }
+      }
+    },
+    "StackIG" : {
+         "Type" : "AWS::EC2::InternetGateway",
+         "Properties" : {}
+    },
+    "StackVPCGA": {
+      "Type": "AWS::EC2::VPCGatewayAttachment",
+      "Properties": {
+        "InternetGatewayId": {
+          "Ref": "StackIG"
+        },
+        "VpcId": {
+          "Ref": "StackVPC"
+        }
+      }
+    },
+    "StackRouteTable": {
+      "Type": "AWS::EC2::RouteTable",
+      "Properties": {
+        "VpcId": {"Ref": "StackVPC"}
+      }
+    },
+    "StackPublicRoute": {
+      "Type": "AWS::EC2::Route",
+      "Properties": {
+        "RouteTableId": {
+          "Ref": "StackRouteTable"
+        },
+        "GatewayId": {
+          "Ref": "StackIG"
+        },
+        "DestinationCidrBlock": "0.0.0.0/0"
+      },
+      "DependsOn": [
+        "StackVPCGA"
+      ]
+    },
+    "StackSubnet": {
+      "Type" : "AWS::EC2::Subnet",
+      "Properties" : {
+        "CidrBlock" : "10.0.0.0/16",
+        "MapPublicIpOnLaunch" : true,
+        "VpcId" : { "Ref" : "StackVPC" }
+      }
+    },
+    "StackMasterWaitHandle" : {
+      "Type" : "AWS::CloudFormation::WaitConditionHandle"
+    },
+    "StackMasterWaitCondition" : {
+      "Type" : "AWS::CloudFormation::WaitCondition",
+      "DependsOn" : "StackMasterServer",
+      "Properties" : {
+        "Count": 1,
+        "Handle" : { "Ref" : "StackMasterWaitHandle" },
+        "Timeout" : "7200"
+      }
+    },
+    "StackMasterServer": {
+      "Type":"AWS::EC2::Instance",
+      "Properties": {
+        "KeyName": {"Ref" : "KeyPair" },
+        "ImageId": "ami-ca56b5aa",
+        "InstanceType": "m4.xlarge",
+        "SubnetId": { "Ref": "StackSubnet" },
+        "SecurityGroupIds": [ { "Ref": "StackSG" } ],
+        "Tags" : [
+          { "Key" : "created_by", "Value" : { "Ref": "PuppetCreatedBy" } },
+          { "Key" : "department", "Value" : { "Ref": "PuppetDepartment" } },
+          { "Key" : "project", "Value" : { "Ref": "PuppetProject" } }
+        ],
+        "UserData" : { "Fn::Base64" : { "Fn::Join" : ["", [
+          "#!/bin/bash -x\n",
+          "yum update -y aws-cfn-bootstrap\n",
+          "set -xeE\n",
+          "signal() { curl -X PUT -H 'Content-Type:' --data-binary '{\"Status\" : \"'$1'\", \"UniqueId\": \"0\"}' '", { "Ref" : "StackMasterWaitHandle" }, "'; }\n",
+          "retrycurl() { set +e; while :; do curl \"$@\"; [ \"$?\" = 0 ] && break; done; set -e; }\n",
+          "trap 'signal FAILURE' ERR\n",
+          "version=2016.2.1\n",
+          "hostname $(curl http://169.254.169.254/latest/meta-data/local-hostname)\n",
+          "mkdir -p /etc/puppetlabs/puppet\n",
+          "echo '*' > /etc/puppetlabs/puppet/autosign.conf\n",
+          "retrycurl --max-time 30 -O https://s3.amazonaws.com/pe-builds/released/2016.2.1/puppet-enterprise-2016.2.1-el-7-x86_64.tar.gz\n",
+          "retrycurl --max-time 15 -o pe-demo.tar.gz http://tse-builds.s3-website-us-west-2.amazonaws.com/2016.2.x/releases/pe-demo-latest.tar.gz\n",
+          "tar -xzf puppet-enterprise-$version-el-7-x86_64.tar.gz\n",
+          "mkdir pe-demo && tar -xzf pe-demo.tar.gz -C pe-demo --strip-components 1\n",
+          "cat > pe.conf <<-EOF\n",
+          "{\n",
+          "  \"console_admin_password\": \"puppetlabs\"\n",
+          "  \"puppet_enterprise::puppet_master_host\": \"%{::trusted.certname}\"\n",
+          "  \"puppet_enterprise::use_application_services\": true\n",
+          "  \"puppet_enterprise::profile::master::r10k_remote\": \"/opt/puppetlabs/repos/control-repo.git\"\n",
+          "  \"puppet_enterprise::profile::master::r10k_private_key\": \"/dev/null\"\n",
+          "  \"puppet_enterprise::profile::master::code_manager_auto_configure\": true\n",
+          "  \"puppet_enterprise::profile::master::check_for_updates\": false\n",
+          "}\n",
+          "EOF\n",
+          "./puppet-enterprise-$version-el-7-x86_64/puppet-enterprise-installer -c pe.conf\n",
+          "/opt/puppetlabs/puppet/bin/gem install aws-sdk-core retries\n",
+          "./pe-demo/scripts/provisioners/puppet_master_bootstrap.sh\n",
+          "signal SUCCESS\n"
+        ]]}}
+      },
+      "DependsOn": [
+        "StackPublicRoute"
+      ]
+    },
+    "StackGitlabServer": {
+      "Type":"AWS::EC2::Instance",
+      "Properties": {
+        "KeyName": {"Ref" : "KeyPair" },
+        "ImageId": "ami-ca56b5aa",
+        "InstanceType": "m4.large",
+        "SubnetId": { "Ref": "StackSubnet" },
+        "SecurityGroupIds": [ { "Ref": "StackSG" } ],
+        "Tags" : [
+          { "Key" : "created_by", "Value" : { "Ref": "PuppetCreatedBy" } },
+          { "Key" : "department", "Value" : { "Ref": "PuppetDepartment" } },
+          { "Key" : "project", "Value" : { "Ref": "PuppetProject" } }
+        ],
+        "UserData" : { "Fn::Base64" : { "Fn::Join" : ["", [
+          "#!/bin/bash -x\n",
+          "yum update -y aws-cfn-bootstrap\n",
+          "set -x\n",
+          "hostname $(curl http://169.254.169.254/latest/meta-data/local-hostname)\n",
+          "curl -k https://", { "Fn::GetAtt" : [ "StackMasterServer", "PrivateDnsName" ] }, ":8140/packages/current/install.bash | bash"
+        ]]}}
+      },
+      "DependsOn": [
+        "StackMasterWaitCondition"
+      ]
+    },
+    "StackRoutetoSubnet": {
+      "Type": "AWS::EC2::SubnetRouteTableAssociation",
+      "Properties": {
+        "RouteTableId": {
+          "Ref": "StackRouteTable"
+        },
+        "SubnetId": {
+          "Ref": "StackSubnet"
+        }
+      }
+    }
+  }
+}
